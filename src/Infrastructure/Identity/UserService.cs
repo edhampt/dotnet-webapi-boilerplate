@@ -11,7 +11,7 @@ using FSH.WebApi.Application.Common.Models;
 using FSH.WebApi.Application.Common.Specification;
 using FSH.WebApi.Application.Identity.Users;
 using FSH.WebApi.Domain.Identity;
-using FSH.WebApi.Infrastructure.Mailing;
+using FSH.WebApi.Infrastructure.Auth;
 using FSH.WebApi.Infrastructure.Persistence.Context;
 using FSH.WebApi.Shared.Authorization;
 using Mapster;
@@ -28,10 +28,10 @@ internal partial class UserService : IUserService
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly RoleManager<ApplicationRole> _roleManager;
     private readonly ApplicationDbContext _db;
-    private readonly IStringLocalizer<UserService> _localizer;
+    private readonly IStringLocalizer _t;
     private readonly IJobService _jobService;
     private readonly IMailService _mailService;
-    private readonly MailSettings _mailSettings;
+    private readonly SecuritySettings _securitySettings;
     private readonly IEmailTemplateService _templateService;
     private readonly IFileStorageService _fileStorage;
     private readonly IEventPublisher _events;
@@ -47,28 +47,28 @@ internal partial class UserService : IUserService
         IStringLocalizer<UserService> localizer,
         IJobService jobService,
         IMailService mailService,
-        IOptions<MailSettings> mailSettings,
         IEmailTemplateService templateService,
         IFileStorageService fileStorage,
         IEventPublisher events,
         ICacheService cache,
         ICacheKeyService cacheKeys,
-        ITenantInfo currentTenant)
+        ITenantInfo currentTenant,
+        IOptions<SecuritySettings> securitySettings)
     {
         _signInManager = signInManager;
         _userManager = userManager;
         _roleManager = roleManager;
         _db = db;
-        _localizer = localizer;
+        _t = localizer;
         _jobService = jobService;
         _mailService = mailService;
-        _mailSettings = mailSettings.Value;
         _templateService = templateService;
         _fileStorage = fileStorage;
         _events = events;
         _cache = cache;
         _cacheKeys = cacheKeys;
         _currentTenant = currentTenant;
+        _securitySettings = securitySettings.Value;
     }
 
     public async Task<PaginationResponse<UserDetailsDto>> SearchAsync(UserListFilter filter, CancellationToken cancellationToken)
@@ -85,14 +85,31 @@ internal partial class UserService : IUserService
         return new PaginationResponse<UserDetailsDto>(users, count, filter.PageNumber, filter.PageSize);
     }
 
-    public async Task<bool> ExistsWithNameAsync(string name) =>
-        await _userManager.FindByNameAsync(name) is not null;
+    public async Task<bool> ExistsWithNameAsync(string name)
+    {
+        EnsureValidTenant();
+        return await _userManager.FindByNameAsync(name) is not null;
+    }
 
-    public async Task<bool> ExistsWithEmailAsync(string email, string? exceptId = null) =>
-        await _userManager.FindByEmailAsync(email.Normalize()) is ApplicationUser user && user.Id != exceptId;
+    public async Task<bool> ExistsWithEmailAsync(string email, string? exceptId = null)
+    {
+        EnsureValidTenant();
+        return await _userManager.FindByEmailAsync(email.Normalize()) is ApplicationUser user && user.Id != exceptId;
+    }
 
-    public async Task<bool> ExistsWithPhoneNumberAsync(string phoneNumber, string? exceptId = null) =>
-        await _userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == phoneNumber) is ApplicationUser user && user.Id != exceptId;
+    public async Task<bool> ExistsWithPhoneNumberAsync(string phoneNumber, string? exceptId = null)
+    {
+        EnsureValidTenant();
+        return await _userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == phoneNumber) is ApplicationUser user && user.Id != exceptId;
+    }
+
+    private void EnsureValidTenant()
+    {
+        if (string.IsNullOrWhiteSpace(_currentTenant?.Id))
+        {
+            throw new UnauthorizedException(_t["Invalid Tenant."]);
+        }
+    }
 
     public async Task<List<UserDetailsDto>> GetListAsync(CancellationToken cancellationToken) =>
         (await _userManager.Users
@@ -110,7 +127,7 @@ internal partial class UserService : IUserService
             .Where(u => u.Id == userId)
             .FirstOrDefaultAsync(cancellationToken);
 
-        _ = user ?? throw new NotFoundException(_localizer["User Not Found."]);
+        _ = user ?? throw new NotFoundException(_t["User Not Found."]);
 
         return user.Adapt<UserDetailsDto>();
     }
@@ -119,12 +136,12 @@ internal partial class UserService : IUserService
     {
         var user = await _userManager.Users.Where(u => u.Id == request.UserId).FirstOrDefaultAsync(cancellationToken);
 
-        _ = user ?? throw new NotFoundException(_localizer["User Not Found."]);
+        _ = user ?? throw new NotFoundException(_t["User Not Found."]);
 
         bool isAdmin = await _userManager.IsInRoleAsync(user, FSHRoles.Admin);
         if (isAdmin)
         {
-            throw new ConflictException(_localizer["Administrators Profile's Status cannot be toggled"]);
+            throw new ConflictException(_t["Administrators Profile's Status cannot be toggled"]);
         }
 
         user.IsActive = request.ActivateUser;
